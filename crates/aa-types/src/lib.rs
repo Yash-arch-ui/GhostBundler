@@ -1,8 +1,16 @@
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use alloy_sol_types::SolValue;
+use alloy_sol_types::{sol, SolCall, SolValue};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug,Clone,Serialize,Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedCall{
+    pub target : Address,
+    pub value: U256,
+    pub data: Bytes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackedUserOperation {
 pub sender: Address,
@@ -14,6 +22,17 @@ pub pre_verification_gas: U256,
 pub gas_fees: B256, 
 pub paymaster_and_data: Bytes,
 pub signature: Bytes,
+}
+
+sol!{
+    function execute(address target , uint256 value, bytes calldata data) external;
+    struct Call{
+        address target;
+        uint256 value;
+        bytes data;
+    }
+    function executeBatch(Call[] calldata calls) external;
+
 }
 
 impl PackedUserOperation{
@@ -43,6 +62,33 @@ impl PackedUserOperation{
         let encoded = (op_hash, entry_point, chain_id).abi_encode();
         keccak256(encoded)
     }
+    pub fn selector(&self) -> Option<[u8; 4]> {
+        self.call_data.get(0..4)?.try_into().ok()
+    }
+    pub fn decode_calls(&self) -> Option<Vec<DecodedCall>>{
+        if let Ok(decoded) = executeCall::abi_decode(&self.call_data){
+            return Some(vec![DecodedCall{
+                target: decoded.target,
+                value: decoded.value,
+                data: decoded.data,
+            }]);
+        }
+
+        if let Ok(decoded) = executeBatchCall::abi_decode(&self.call_data) {
+            return Some(
+                decoded.calls
+                .into_iter()
+                .map(|c| DecodedCall {
+                    target: c.target,
+                    value: c.value,
+                    data: c.data,
+                })
+                .collect(),
+            );
+        }
+
+        None
+    }
 
 }
 
@@ -63,7 +109,35 @@ mod tests {
             signature: Bytes::new(),
         }
     }
+    #[test]
+        fn decodes_single_execute_call(){
+        let call = executeCall {
+            target: Address::repeat_byte(0xAA),
+            value: U256::from(100),
+            data: Bytes::from(vec![0x12, 0x34]),
+        };
+        let mut op = sample_op();
+         op.call_data = Bytes::from(call.abi_encode());
+        let decoded = op.decode_calls().unwrap();
+        assert_eq!(decoded[0].target, Address::repeat_byte(0xAA));
+        assert_eq!(decoded[0].value, U256::from(100));
 
+    }
+   
+    #[test]
+    fn decodes_execute_batch_call(){
+        let calls = vec![
+            Call{ target: Address::repeat_byte(0x01), value: U256::from(1), data:Bytes::new()},
+            Call{ target: Address::repeat_byte(0x02), value: U256::from(2), data:Bytes::new()},
+
+        ];
+        let batch = executeBatchCall{calls};
+        let mut op = sample_op();
+        op.call_data = Bytes::from(batch.abi_encode());
+        let decoded = op.decode_calls().unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[1].target, Address::repeat_byte(0x02));
+    }
     #[test]
     fn serializes_and_deserializes() {
         let op = sample_op();
@@ -87,5 +161,21 @@ mod tests {
         let hash_chain_1 = op.user_op_hash(entry_point, U256::from(1));
         let hash_chain_2 = op.user_op_hash(entry_point, U256::from(2));
         assert_ne!(hash_chain_1, hash_chain_2);
+    }
+    #[test]
+    fn extracts_selector_from_execute_calldata() {
+        // First 4 bytes = selector, rest is padding (doesn't matter for this test)
+        let call_data = Bytes::from(vec![0xb6, 0x1d, 0x27, 0xf6, 0x00, 0x00, 0x00, 0x00]);
+        let mut op = sample_op();
+        op.call_data = call_data;
+        let selector = op.selector();
+        assert_eq!(selector, Some([0xb6, 0x1d, 0x27, 0xf6]));
+    }
+
+    #[test]
+    fn returns_none_when_calldata_too_short() {
+        let mut op = sample_op();
+        op.call_data = Bytes::from(vec![0x01, 0x02]); // only 2 bytes, not enough
+        assert_eq!(op.selector(), None);
     }
 }
