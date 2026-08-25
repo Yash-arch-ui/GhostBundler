@@ -1,30 +1,41 @@
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use alloy_sol_types::{sol, SolCall, SolValue};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_sol_types::{SolCall, SolValue, sol};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DecodedCall{
-    pub target : Address,
+pub struct DecodedCall {
+    pub target: Address,
     pub value: U256,
     pub data: Bytes,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModuleEntity {
+    pub module: Address,
+    pub entity_id: u32,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedValidation {
+    pub entity: ModuleEntity,
+    pub is_global: bool,
+    pub inner_signature: Bytes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackedUserOperation {
-pub sender: Address,
-pub nonce: U256,
-pub init_code: Bytes, 
-pub call_data: Bytes,
-pub account_gas_limits: B256,
-pub pre_verification_gas: U256,
-pub gas_fees: B256, 
-pub paymaster_and_data: Bytes,
-pub signature: Bytes,
+    pub sender: Address,
+    pub nonce: U256,
+    pub init_code: Bytes,
+    pub call_data: Bytes,
+    pub account_gas_limits: B256,
+    pub pre_verification_gas: U256,
+    pub gas_fees: B256,
+    pub paymaster_and_data: Bytes,
+    pub signature: Bytes,
 }
 
-sol!{
+sol! {
     function execute(address target , uint256 value, bytes calldata data) external;
     struct Call{
         address target;
@@ -35,8 +46,8 @@ sol!{
 
 }
 
-impl PackedUserOperation{
-    pub fn hash(&self) -> B256{
+impl PackedUserOperation {
+    pub fn hash(&self) -> B256 {
         let init_code_hash = keccak256(&self.init_code);
         let call_data_hash = keccak256(&self.call_data);
         let paymaster_and_data_hash = keccak256(&self.paymaster_and_data);
@@ -57,7 +68,7 @@ impl PackedUserOperation{
     }
 
     /// Final userOpHash: binds the op hash to entryPoint + chaindId(replay Protection)
-    pub fn user_op_hash(&self, entry_point: Address , chain_id: U256) -> B256 {
+    pub fn user_op_hash(&self, entry_point: Address, chain_id: U256) -> B256 {
         let op_hash = self.hash();
         let encoded = (op_hash, entry_point, chain_id).abi_encode();
         keccak256(encoded)
@@ -65,9 +76,9 @@ impl PackedUserOperation{
     pub fn selector(&self) -> Option<[u8; 4]> {
         self.call_data.get(0..4)?.try_into().ok()
     }
-    pub fn decode_calls(&self) -> Option<Vec<DecodedCall>>{
-        if let Ok(decoded) = executeCall::abi_decode(&self.call_data){
-            return Some(vec![DecodedCall{
+    pub fn decode_calls(&self) -> Option<Vec<DecodedCall>> {
+        if let Ok(decoded) = executeCall::abi_decode(&self.call_data) {
+            return Some(vec![DecodedCall {
                 target: decoded.target,
                 value: decoded.value,
                 data: decoded.data,
@@ -76,20 +87,43 @@ impl PackedUserOperation{
 
         if let Ok(decoded) = executeBatchCall::abi_decode(&self.call_data) {
             return Some(
-                decoded.calls
-                .into_iter()
-                .map(|c| DecodedCall {
-                    target: c.target,
-                    value: c.value,
-                    data: c.data,
-                })
-                .collect(),
+                decoded
+                    .calls
+                    .into_iter()
+                    .map(|c| DecodedCall {
+                        target: c.target,
+                        value: c.value,
+                        data: c.data,
+                    })
+                    .collect(),
             );
         }
 
         None
     }
+    pub fn resolve_validation(&self) -> Option<ResolvedValidation> {
+        let sig = &self.signature;
+        if sig.len() < 25 {
+            return None;
+        }
 
+        let module_bytes: [u8; 20] = sig[0..20].try_into().ok()?;
+        let entity_id_bytes: [u8; 4] = sig[20..24].try_into().ok()?;
+
+        let entity = ModuleEntity {
+            module: Address::from(module_bytes),
+            entity_id: u32::from_be_bytes(entity_id_bytes),
+        };
+
+        let is_global = sig[24] == 1;
+        let inner_signature = Bytes::copy_from_slice(&sig[25..]);
+
+        Some(ResolvedValidation {
+            entity,
+            is_global,
+            inner_signature,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -110,28 +144,34 @@ mod tests {
         }
     }
     #[test]
-        fn decodes_single_execute_call(){
+    fn decodes_single_execute_call() {
         let call = executeCall {
             target: Address::repeat_byte(0xAA),
             value: U256::from(100),
             data: Bytes::from(vec![0x12, 0x34]),
         };
         let mut op = sample_op();
-         op.call_data = Bytes::from(call.abi_encode());
+        op.call_data = Bytes::from(call.abi_encode());
         let decoded = op.decode_calls().unwrap();
         assert_eq!(decoded[0].target, Address::repeat_byte(0xAA));
         assert_eq!(decoded[0].value, U256::from(100));
-
     }
-   
-    #[test]
-    fn decodes_execute_batch_call(){
-        let calls = vec![
-            Call{ target: Address::repeat_byte(0x01), value: U256::from(1), data:Bytes::new()},
-            Call{ target: Address::repeat_byte(0x02), value: U256::from(2), data:Bytes::new()},
 
+    #[test]
+    fn decodes_execute_batch_call() {
+        let calls = vec![
+            Call {
+                target: Address::repeat_byte(0x01),
+                value: U256::from(1),
+                data: Bytes::new(),
+            },
+            Call {
+                target: Address::repeat_byte(0x02),
+                value: U256::from(2),
+                data: Bytes::new(),
+            },
         ];
-        let batch = executeBatchCall{calls};
+        let batch = executeBatchCall { calls };
         let mut op = sample_op();
         op.call_data = Bytes::from(batch.abi_encode());
         let decoded = op.decode_calls().unwrap();
@@ -177,5 +217,36 @@ mod tests {
         let mut op = sample_op();
         op.call_data = Bytes::from(vec![0x01, 0x02]); // only 2 bytes, not enough
         assert_eq!(op.selector(), None);
+    }
+    #[test]
+    fn resolves_module_entity_from_signature() {
+        let module = Address::repeat_byte(0xCC);
+        let entity_id: u32 = 1;
+
+        let mut sig_bytes = Vec::new();
+        sig_bytes.extend_from_slice(module.as_slice()); // 20 bytes
+        sig_bytes.extend_from_slice(&entity_id.to_be_bytes()); // 4 bytes
+        sig_bytes.push(1); // isGlobal = true
+        sig_bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // inner sig
+
+        let mut op = sample_op();
+        op.signature = Bytes::from(sig_bytes);
+
+        let resolved = op.resolve_validation().unwrap();
+
+        assert_eq!(resolved.entity.module, module);
+        assert_eq!(resolved.entity.entity_id, 1);
+        assert!(resolved.is_global);
+        assert_eq!(
+            resolved.inner_signature,
+            Bytes::from(vec![0xde, 0xad, 0xbe, 0xef])
+        );
+    }
+
+    #[test]
+    fn returns_none_for_signature_too_short() {
+        let mut op = sample_op();
+        op.signature = Bytes::from(vec![0x01, 0x02]);
+        assert_eq!(op.resolve_validation(), None);
     }
 }

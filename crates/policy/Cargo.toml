@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aa-types = { path = "../aa-types" }
+alloy-primitives = { version = "1.6.1", features = ["serde"] }
+petgraph = "0.6"
