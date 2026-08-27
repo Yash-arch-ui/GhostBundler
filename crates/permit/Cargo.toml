@@ -1,0 +1,11 @@
+[package]
+name = "permit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy-primitives = { version = "1.7.1", features = ["serde"] }
+alloy-sol-types = "1.7.1"
+anyhow = "1.0.104"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+sha3 = "0.10"

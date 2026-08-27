@@ -4,5 +4,6 @@ members = [
     "crates/ghostd",
     "crates/aa-types",
     "crates/policy",
+    "crates/permit",
     "crates/sim",
 ]

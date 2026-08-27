@@ -1,1 +1,5 @@
 /target
+contracts/cache/
+contracts/lib/
+contracts/out/
+contracts/node_modules/
