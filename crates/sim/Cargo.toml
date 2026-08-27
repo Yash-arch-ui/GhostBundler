@@ -4,3 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aa-types = { version = "0.1.0", path = "../aa-types" }
+alloy-primitives = { version = "1.7.1", features = ["serde"] }
+alloy-provider = "2.4.1"
+alloy-rpc-types-eth = "2.4.1"
+alloy-sol-types = "1.7.1"
+anyhow = "1.0.104"
+hex = "0.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53.1", features = ["full"] }
+
+[dev-dependencies]
+alloy-network = "2.4.1"
+alloy-transport-http = "2.4.1"
