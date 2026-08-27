@@ -31,9 +31,8 @@ pub struct PermitSigner {
 
 impl PermitSigner {
     pub fn new(private_key_bytes: [u8; 32]) -> anyhow::Result<Self> {
-        let signing_key =
-            SigningKey::from_bytes(&private_key_bytes.into())
-                .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
+        let signing_key = SigningKey::from_bytes(&private_key_bytes.into())
+            .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
         Ok(Self { signing_key })
     }
 
@@ -186,8 +185,7 @@ mod tests {
         // DIFFERENT address, proving sign() does NOT double-hash.
         let double_hash = keccak256(digest.as_slice());
         let key_double =
-            VerifyingKey::recover_from_prehash(double_hash.as_slice(), &signature, recid)
-                .unwrap();
+            VerifyingKey::recover_from_prehash(double_hash.as_slice(), &signature, recid).unwrap();
         let addr_double = pubkey_to_address(&key_double);
         assert_ne!(
             addr_double, expected_addr,

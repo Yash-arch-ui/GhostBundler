@@ -7,11 +7,11 @@
  *   3. Return a normalised SimOutcome
  */
 
+use aa_types::PackedUserOperation;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::{SolCall, SolError, sol};
-use aa_types::PackedUserOperation;
 use serde::{Deserialize, Serialize};
 
 // ── ABI helpers ──────────────────────────────────────────────────────
@@ -75,7 +75,13 @@ fn pack_user_op(op: &PackedUserOperation) -> Sop {
 
 fn encode_handle_ops(ops: &[PackedUserOperation], beneficiary: Address) -> Bytes {
     let sops: Vec<Sop> = ops.iter().map(pack_user_op).collect();
-    Bytes::from(handleOpsCall { ops: sops, beneficiary }.abi_encode())
+    Bytes::from(
+        handleOpsCall {
+            ops: sops,
+            beneficiary,
+        }
+        .abi_encode(),
+    )
 }
 
 fn classify_revert(revert_data: &[u8]) -> SimOutcome {
@@ -267,8 +273,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         };
-        let gas = simulate_gas_estimate(&config, &[], Address::repeat_byte(0xBB))
-            .await;
+        let gas = simulate_gas_estimate(&config, &[], Address::repeat_byte(0xBB)).await;
         assert!(gas.is_err(), "expected error for empty ops on Anvil");
     }
 }

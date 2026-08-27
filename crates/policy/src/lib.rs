@@ -20,14 +20,14 @@ pub enum AuthorityNode {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthorityEdge {
-    ValidatesFor{via_global: bool},// true = only reachable via isGlobal+allowGlobalValidation
+    ValidatesFor { via_global: bool }, // true = only reachable via isGlobal+allowGlobalValidation
     Invokes,
 }
 pub struct AuthorityGraph {
     pub graph: DiGraph<AuthorityNode, AuthorityEdge>,
     node_index: HashMap<AuthorityNode, NodeIndex>,
 }
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct Finding {
     pub entity: ModuleEntity,
     pub selector: [u8; 4],
@@ -69,12 +69,13 @@ impl AuthorityGraph {
     }
 
     /// Records that a selector, when executed, invokes a given contract.
-    pub fn add_invokes(&mut self, selector: [u8; 4], target: Address){
-    let selector_node = self.get_or_insert(AuthorityNode::Selector{ selector});
-    let target_node = self.get_or_insert(AuthorityNode::Target{ address: target });
-    self.graph.add_edge(selector_node, target_node, AuthorityEdge::Invokes);
-   }
-     pub fn find_privilege_amplification(&self) -> Vec<Finding> {
+    pub fn add_invokes(&mut self, selector: [u8; 4], target: Address) {
+        let selector_node = self.get_or_insert(AuthorityNode::Selector { selector });
+        let target_node = self.get_or_insert(AuthorityNode::Target { address: target });
+        self.graph
+            .add_edge(selector_node, target_node, AuthorityEdge::Invokes);
+    }
+    pub fn find_privilege_amplification(&self) -> Vec<Finding> {
         let mut findings = Vec::new();
 
         for edge_ref in self.graph.edge_references() {
@@ -89,7 +90,8 @@ impl AuthorityGraph {
                 {
                     // Walk forward from the selector to whatever target it invokes.
                     for target_edge in self.graph.edges(edge_ref.target()) {
-                        if let AuthorityNode::Target { address } = &self.graph[target_edge.target()] {
+                        if let AuthorityNode::Target { address } = &self.graph[target_edge.target()]
+                        {
                             findings.push(Finding {
                                 entity: entity.clone(),
                                 selector: *selector,
@@ -105,6 +107,46 @@ impl AuthorityGraph {
         findings
     }
 
+    pub fn find_validation_applicability_violations(&self) -> Vec<Finding> {
+        let mut findings = Vec::new();
+
+        let invoked_selectors: Vec<(NodeIndex, [u8; 4])> = self
+            .graph
+            .node_indices()
+            .filter_map(|idx| {
+                if let AuthorityNode::Selector { selector } = &self.graph[idx] {
+                    Some((idx, *selector))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Step 2: for every Validation node in the graph.....
+
+        for val_idx in self.graph.node_indices() {
+            let AuthorityNode::Validation { entity, .. } = &self.graph[val_idx] else {
+                continue;
+            };
+
+            // Step 3: .... check each invloed Selector: does an edge exist
+            // from this validator to this selecotr at all ?
+            for &(sel_idx, selector) in &invoked_selectors {
+                let has_edge = self.graph.find_edge(val_idx, sel_idx).is_some();
+
+                if !has_edge {
+                    findings.push(Finding {
+                        entity: entity.clone(),
+                        selector,
+                        target: Address::ZERO, // no valid path, so no specific target
+                        reason: "validator has no authorization path to this selector at all"
+                            .into(),
+                    });
+                }
+            }
+        }
+        findings
+    }
 }
 
 #[cfg(test)]
@@ -144,7 +186,9 @@ mod tests {
         g.add_invokes(selector, Address::repeat_byte(0xBB));
 
         // selector node should be shared/reused, not duplicated
-        let selector_nodes = g.graph.node_weights()
+        let selector_nodes = g
+            .graph
+            .node_weights()
             .filter(|n| matches!(n, AuthorityNode::Selector { selector: s } if *s == selector))
             .count();
         assert_eq!(selector_nodes, 1);
