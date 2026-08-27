@@ -1,7 +1,6 @@
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::SolValue;
 use k256::ecdsa::{SigningKey, VerifyingKey};
-use sha3::{Digest, Keccak256};
 
 #[derive(Debug, Clone)]
 pub struct RiskPermit {
@@ -38,13 +37,17 @@ impl PermitSigner {
         Ok(Self { signing_key })
     }
 
+    /// Sign a RiskPermit.
+    ///
+    /// `permit.digest()` is already a single keccak256 hash (32 bytes).
+    /// We sign it directly as a raw prehash — no additional hashing.
+    /// This matches Solidity's ECDSA.recover which treats the input as the
+    /// raw signed hash.
     pub fn sign(&self, permit: &RiskPermit) -> anyhow::Result<Bytes> {
         let digest = permit.digest();
         let (sig, recid) = self
             .signing_key
-            .sign_digest_recoverable(
-                Keccak256::new_with_prefix(digest.as_slice()),
-            )
+            .sign_prehash_recoverable(digest.as_slice())
             .map_err(|e| anyhow::anyhow!("signing failed: {e}"))?;
         let mut v = [0u8; 65];
         v[..32].copy_from_slice(&sig.r().to_bytes());
@@ -66,6 +69,12 @@ impl PermitSigner {
 mod tests {
     use super::*;
     use k256::ecdsa::RecoveryId;
+
+    fn pubkey_to_address(key: &VerifyingKey) -> Address {
+        let point = key.to_encoded_point(false);
+        let hash = keccak256(&point.as_bytes()[1..]);
+        Address::from_slice(&hash[12..])
+    }
 
     fn test_signer() -> PermitSigner {
         PermitSigner::new([0xab; 32]).unwrap()
@@ -130,17 +139,59 @@ mod tests {
         let signature = k256::ecdsa::Signature::from_scalars(r, s).unwrap();
 
         let digest = permit.digest();
+
+        // Recover using sign_prehash_recoverable's counterpart:
+        // recover_from_prehash signs zero additional hashing.
         let recovered_key =
-            VerifyingKey::recover_from_digest(
-                Keccak256::new_with_prefix(digest.as_slice()),
-                &signature,
-                recid,
-            )
-            .expect("recovery should succeed");
+            VerifyingKey::recover_from_prehash(digest.as_slice(), &signature, recid)
+                .expect("recovery should succeed");
 
         let recovered_pub = recovered_key.to_encoded_point(false);
         let recovered_hash = keccak256(&recovered_pub.as_bytes()[1..]);
         let recovered_addr = Address::from_slice(&recovered_hash[12..]);
         assert_eq!(recovered_addr, expected);
+    }
+
+    /// Definitive proof test: sign() signs permit.digest() DIRECTLY (single
+    /// keccak256), NOT keccak256(permit.digest()) (double hash).
+    ///
+    /// We sign with sign_prehash_recoverable (no additional hashing), then
+    /// recover against both the raw digest and a double-hashed version.
+    /// Only the raw digest recovery yields the correct signer address.
+    #[test]
+    fn signs_single_hash_not_double_hash() {
+        let signer = test_signer();
+        let expected_addr = signer.public_address();
+        let permit = test_permit();
+        let digest = permit.digest();
+        let sig_bytes = signer.sign(&permit).unwrap();
+
+        let r = <[u8; 32]>::try_from(&sig_bytes[..32]).unwrap();
+        let s = <[u8; 32]>::try_from(&sig_bytes[32..64]).unwrap();
+        let v = sig_bytes[64];
+        let recid = RecoveryId::try_from(v - 27).unwrap();
+        let signature = k256::ecdsa::Signature::from_scalars(r, s).unwrap();
+
+        // Recover against the raw digest (single keccak256) — MUST yield
+        // the correct signer address.
+        let key_raw =
+            VerifyingKey::recover_from_prehash(digest.as_slice(), &signature, recid).unwrap();
+        let addr_raw = pubkey_to_address(&key_raw);
+        assert_eq!(
+            addr_raw, expected_addr,
+            "raw digest recovery must match signer address"
+        );
+
+        // Recover against keccak256(digest) (double hash) — yields a
+        // DIFFERENT address, proving sign() does NOT double-hash.
+        let double_hash = keccak256(digest.as_slice());
+        let key_double =
+            VerifyingKey::recover_from_prehash(double_hash.as_slice(), &signature, recid)
+                .unwrap();
+        let addr_double = pubkey_to_address(&key_double);
+        assert_ne!(
+            addr_double, expected_addr,
+            "double-hash recovery must NOT match signer — sign() signs single hash"
+        );
     }
 }
