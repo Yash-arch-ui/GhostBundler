@@ -4,7 +4,7 @@ use petgraph::graph::DiGraph;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
-
+use std::collections::HashSet;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AuthorityNode {
     Validation {
@@ -17,11 +17,17 @@ pub enum AuthorityNode {
     Target {
         address: Address,
     },
+    Hook {
+        entity: ModuleEntity,
+        is_pre: bool,
+        is_post: bool,
+    },
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthorityEdge {
     ValidatesFor { via_global: bool }, // true = only reachable via isGlobal+allowGlobalValidation
     Invokes,
+    Guards, // NEW - Hook -> Selector
 }
 pub struct AuthorityGraph {
     pub graph: DiGraph<AuthorityNode, AuthorityEdge>,
@@ -75,6 +81,22 @@ impl AuthorityGraph {
         self.graph
             .add_edge(selector_node, target_node, AuthorityEdge::Invokes);
     }
+    pub fn add_guards(
+        &mut self,
+        hook_entity: ModuleEntity,
+        is_pre: bool,
+        is_post: bool,
+        selector: [u8; 4],
+    ) {
+        let hook_node = self.get_or_insert(AuthorityNode::Hook {
+            entity: hook_entity,
+            is_pre,
+            is_post,
+        });
+        let sel_node = self.get_or_insert(AuthorityNode::Selector { selector });
+        self.graph
+            .add_edge(hook_node, sel_node, AuthorityEdge::Guards);
+    }
     pub fn find_privilege_amplification(&self) -> Vec<Finding> {
         let mut findings = Vec::new();
 
@@ -115,7 +137,7 @@ impl AuthorityGraph {
             .node_indices()
             .filter_map(|idx| {
                 if let AuthorityNode::Selector { selector } = &self.graph[idx] {
-                    Some((idx, *selector))
+                    Some((idx, *selector)) // keep only the selector otherwise dont keep it !!!! 
                 } else {
                     None
                 }
@@ -146,6 +168,46 @@ impl AuthorityGraph {
             }
         }
         findings
+    }
+    pub fn find_missing_hooks(&self, sensitive_selectors: &HashSet<[u8; 4]>) -> Vec<Finding> {
+        let mut findings = Vec::new();
+
+        for idx in self.graph.node_indices() {
+            let AuthorityNode::Selector { selector } = &self.graph[idx] else {
+                continue;
+            };
+
+            // Only care about selectors explicitly marked sensitive.
+            if !sensitive_selectors.contains(selector) {
+                continue;
+            }
+
+            // Check if ANY Hook node has a Guards edge pointing at this selector.
+            let is_guarded = self
+                .graph
+                .edges_directed(idx, petgraph::Direction::Incoming)
+                .any(|edge| matches!(edge.weight(), AuthorityEdge::Guards));
+
+            if !is_guarded {
+                findings.push(Finding {
+                    entity: ModuleEntity {
+                        module: Address::ZERO,
+                        entity_id: 0,
+                    }, // no specific validator responsible — this is a missing-guard issue
+                    selector: *selector,
+                    target: Address::ZERO,
+                    reason: "sensitive selector has no execution hook guarding it".into(),
+                });
+            }
+        }
+
+        findings
+    }
+    pub fn run_all_rules(&self, sensitive_selectors: &HashSet<[u8; 4]>) -> Vec<Finding> {
+        let mut all_findings = self.find_privilege_amplification();
+        all_findings.extend(self.find_validation_applicability_violations());
+        all_findings.extend(self.find_missing_hooks(sensitive_selectors));
+        all_findings
     }
 }
 
