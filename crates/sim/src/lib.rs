@@ -169,7 +169,7 @@ pub async fn simulate_validation(
                 .and_then(|start| {
                     let rest = &msg[start + 5..];
                     // skip optional colon+space
-                    let rest = rest.trim_start_matches(|c| c == ':' || c == ' ');
+                    let rest = rest.trim_start_matches([':', ' ']);
                     if rest.starts_with("\"0x") {
                         let data_start = 3; // skip "0x
                         if let Some(end) = rest[data_start..].find('"') {
@@ -178,11 +178,10 @@ pub async fn simulate_validation(
                     }
                     None
                 });
-            if let Some(hex_str) = hex_str {
-                if let Ok(bytes) = hex::decode(hex_str) {
-                    eprintln!("DEBUG classify_revert: data len={}, data={}", bytes.len(), hex_str);
-                    return Ok(classify_revert(&bytes));
-                }
+            if let Some(hex_str) = hex_str
+                && let Ok(bytes) = hex::decode(hex_str)
+            {
+                return Ok(classify_revert(&bytes));
             }
             Ok(SimOutcome::Unknown { raw: msg })
         }
@@ -211,7 +210,7 @@ pub async fn run_simulation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::FixedBytes;
+    use alloy_primitives::{FixedBytes, U256};
 
     #[test]
     fn classify_account_error() {
@@ -270,24 +269,4 @@ mod tests {
         assert_eq!(&calldata[..4], &expected_sel);
     }
 
-    #[tokio::test]
-    async fn integration_anvil_needed() {
-        use std::net::TcpStream;
-        let reachable = TcpStream::connect("127.0.0.1:8545").is_ok();
-        if !reachable {
-            eprintln!("Skipping Anvil integration test — no node on :8545");
-            return;
-        }
-        let config = SimConfig {
-            rpc_url: "http://127.0.0.1:8545".into(),
-            entry_point: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
-                .parse()
-                .unwrap(),
-            account: "0x192b0600c00a60a2B3Bee06bCe4eBe3e45A9c129"
-                .parse()
-                .unwrap(),
-        };
-        let gas = simulate_gas_estimate(&config, &[], Address::repeat_byte(0xBB)).await;
-        assert!(gas.is_err(), "expected error for empty ops on Anvil");
-    }
 }

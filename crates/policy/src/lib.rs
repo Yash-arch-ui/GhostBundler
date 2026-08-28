@@ -41,6 +41,12 @@ pub struct Finding {
     pub reason: String,
 }
 
+impl Default for AuthorityGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthorityGraph {
     pub fn new() -> Self {
         Self {
