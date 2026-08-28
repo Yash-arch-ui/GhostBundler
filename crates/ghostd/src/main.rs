@@ -78,34 +78,25 @@ async fn preflight(Json(req): Json<PreFlightRequest>) -> Json<PreFlightResponse>
     - one gets you the target . value/ data from the execute/executeBatch, the other gets you whihc which ModuleEntity signed this and whether its global
     */
     let mut graph = AuthorityGraph::new();
-    if let (Some(calls), Some(validation)) = (decoded_calls, &resolved) {
-        if let Some(selector) = op.selector() {
-            // FIX #4 — explicitly_scoped is hardcoded to `false` as a known simplification.
-            // A complete implementation would query the account's on-chain validation config
-            // via IERC6900AccountView.getValidationData() to check whether this selector is
-            // in the validator's explicitly-installed allowed-selector list. When
-            // explicitly_scoped=true, the path is NOT flagged as "via global" even if the
-            // validator itself is global, because the account owner explicitly scoped it.
-            // For now, every call through a global validator is treated as potentially
-            // amplified, which is the safe/conservative default.
-            graph.add_validates_for(
-                validation.entity.clone(),
-                validation.is_global,
-                selector,
-                false,
-            );
-            for call in calls {
-                graph.add_invokes(selector, call.target);
-            }
-            /*
-            Draws the validator→selector edge, then loops over
-            every decoded inner call and draws selector→target
-            edges for each one. .clone() on validation.entity is
-             needed because add_validates_for takes ownership of
-              the ModuleEntity, but validation itself is only
-              borrowed here (from the resolved variable), so you
-               clone it rather than move it.
-            */
+    if let (Some(calls), Some(validation)) = (decoded_calls, &resolved)
+        && let Some(selector) = op.selector()
+    {
+        // FIX #4 — explicitly_scoped is hardcoded to `false` as a known simplification.
+        // A complete implementation would query the account's on-chain validation config
+        // via IERC6900AccountView.getValidationData() to check whether this selector is
+        // in the validator's explicitly-installed allowed-selector list. When
+        // explicitly_scoped=true, the path is NOT flagged as "via global" even if the
+        // validator itself is global, because the account owner explicitly scoped it.
+        // For now, every call through a global validator is treated as potentially
+        // amplified, which is the safe/conservative default.
+        graph.add_validates_for(
+            validation.entity.clone(),
+            validation.is_global,
+            selector,
+            false,
+        );
+        for call in calls {
+            graph.add_invokes(selector, call.target);
         }
     }
 
@@ -370,12 +361,6 @@ mod tests {
         let resp = preflight(Json(request)).await;
         let body = resp.0;
 
-        println!("=== UNSAFE CASE ===");
-        println!("verdict:         {}", body.verdict);
-        println!("findings:        {:?}", body.findings);
-        println!("permit_issued:   {}", body.permit_issued);
-        println!("gas_estimate:    {:?}", body.gas_estimate);
-
         assert_eq!(body.verdict, "unsafe", "session key drain should be unsafe");
         assert!(!body.findings.is_empty(), "should have at least one finding");
         assert!(
@@ -415,13 +400,6 @@ mod tests {
         let resp = preflight(Json(request)).await;
         let body = resp.0;
 
-        println!("=== SAFE CASE ===");
-        println!("verdict:         {}", body.verdict);
-        println!("findings:        {:?}", body.findings);
-        println!("permit_issued:   {}", body.permit_issued);
-        println!("permit_signature: {:?}", body.permit_signature);
-        println!("gas_estimate:    {:?}", body.gas_estimate);
-
         assert_eq!(body.verdict, "safe", "owner benign call should be safe");
         assert!(body.findings.is_empty(), "safe op should have no findings");
         assert!(body.permit_issued, "safe op should receive a permit");
@@ -439,101 +417,40 @@ mod tests {
         hex::decode(&sig[2..]).expect("permit sig should be valid hex");
     }
 
-    /// Debug: print the raw simulation result for the safe UserOp
+    /// Verify that the Rust user_op_hash matches on-chain getUserOpHash
+    /// by sending a signed UserOp through sim::run_simulation.
+    /// If the hash were wrong, validateUserOp would revert with AA24.
     #[tokio::test]
-    async fn debug_simulation_result() {
+    async fn test_user_op_hash_matches_onchain() {
         if TcpStream::connect("127.0.0.1:8545").is_err() {
-            eprintln!("Skipping debug test — no Anvil on :8545");
-            return;
-        }
-        let op = build_safe_user_op();
-        let beneficiary = Address::repeat_byte(0xBB);
-        let config = SimConfig {
-            rpc_url: "http://localhost:8545".into(),
-            entry_point: ENTRY_POINT_ADDR,
-            account: ACCOUNT,
-        };
-        let result = sim::run_simulation(&config, vec![op], beneficiary).await;
-        match &result {
-            Ok(r) => {
-                println!("DEBUG gas_estimate: {:?}", r.gas_estimate);
-                println!("DEBUG validation: {:?}", r.validation);
-            }
-            Err(e) => {
-                println!("DEBUG run_simulation ERROR: {e:#}");
-            }
-        }
-    }
-
-    /// Debug: compare Rust user_op_hash with on-chain getUserOpHash
-    #[tokio::test]
-    async fn debug_compare_hash() {
-        if TcpStream::connect("127.0.0.1:8545").is_err() {
-            eprintln!("Skipping debug test — no Anvil on :8545");
+            eprintln!("Skipping integration test — no Anvil on :8545");
             return;
         }
 
         let op = build_safe_user_op();
 
-        // Compute Rust hash
-        let rust_hash = op.user_op_hash(ENTRY_POINT_ADDR, U256::from(31337));
-        println!("Rust user_op_hash:    {}", rust_hash);
-
-        // Build the call data for getUserOpHash(PackedUserOperation)
-        // selector = keccak256("getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))")
-        let mut encoded = Vec::new();
-
-        // Encode the tuple as ABI:
-        // offset 0x00: address sender (padded to 32)
-        encoded.extend_from_slice(&[0u8; 12]);
-        encoded.extend_from_slice(op.sender.as_slice());
-        // offset 0x20: uint256 nonce
-        let nonce_bytes = op.nonce.to_be_bytes::<32>();
-        encoded.extend_from_slice(&nonce_bytes);
-        // offset 0x40: offset to bytes initCode = 0x120 (9 * 32 = 288 = 0x120)
-        encoded.extend_from_slice(&[0u8; 31]);
-        encoded.push(0x90); // wrong... let me just use cast
-
-        // Actually let's just use cast call to compare
-        println!("Expected owner address: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-        println!("ENTRY_POINT: {}", ENTRY_POINT_ADDR);
-        println!("ACCOUNT: {}", ACCOUNT);
-        println!("SINGLE_SIGNER_MODULE: {}", SINGLE_SIGNER_MODULE);
-
-        // Use the sim crate's existing ethereum provider to call getUserOpHash
-        // Simpler: call via the EntryPointSimulations contract
-        let beneficiary = Address::repeat_byte(0xBB);
-        let config = SimConfig {
-            rpc_url: "http://localhost:8545".into(),
-            entry_point: ENTRY_POINT_ADDR,
-            account: ACCOUNT,
-        };
-
-        // Build signed op
         let user_op_hash = op.user_op_hash(ENTRY_POINT_ADDR, U256::from(31337));
         let inner_sig = sign_hash(user_op_hash, &OWNER_KEY);
         let mut prefix = build_validation_prefix(0, false);
         prefix.extend_from_slice(&inner_sig);
-        let mut signed_op = op.clone();
+        let mut signed_op = op;
         signed_op.signature = Bytes::from(prefix);
 
-        println!("Signed signature len: {}", signed_op.signature.len());
-        println!("Signature prefix: {}", hex::encode(&signed_op.signature[..26]));
-        println!("Signature 0xFF marker: {}", signed_op.signature[26]);
-        println!("ECDSA sig len: {}", signed_op.signature.len() - 27);
-        println!("user_op_hash: {}", user_op_hash);
-        println!("eth_sign_hash: {}", eth_sign_hash(user_op_hash));
+        let beneficiary = Address::repeat_byte(0xBB);
+        let config = SimConfig {
+            rpc_url: "http://localhost:8545".into(),
+            entry_point: ENTRY_POINT_ADDR,
+            account: ACCOUNT,
+        };
 
-        let result = sim::run_simulation(&config, vec![signed_op], beneficiary).await;
-        match &result {
-            Ok(r) => {
-                println!("DEBUG gas_estimate: {:?}", r.gas_estimate);
-                println!("DEBUG validation: {:?}", r.validation);
-                println!("DEBUG findings: {:?}", r.validation);
-            }
-            Err(e) => {
-                println!("DEBUG run_simulation ERROR: {e:#}");
-            }
-        }
+        let result = sim::run_simulation(&config, vec![signed_op], beneficiary)
+            .await
+            .expect("simulation should not error");
+
+        assert!(
+            matches!(result.validation, SimOutcome::Success),
+            "validateUserOp should succeed — hash must match on-chain getUserOpHash; got {:?}",
+            result.validation
+        );
     }
 }
