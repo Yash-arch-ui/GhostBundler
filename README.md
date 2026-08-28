@@ -10,7 +10,7 @@ It is a weekend hackathon-scale MVP, not production software.
 
 ## What This Is NOT
 
-- **Not a production firewall.** It has a hardcoded RPC URL (`http://localhost:8545`), a hardcoded Anvil chain ID (`31337`), a hardcoded EntryPoint address, and a demo-only permit signer key (`[0xab; 32]`). None of these are configurable without code changes.
+- **Not a production firewall.** It has a hardcoded RPC URL (`http://localhost:8545`), a hardcoded Anvil chain ID (`31337`), and a hardcoded EntryPoint address. None of these are configurable without code changes.
 - **Not a full ERC-4337 bundler.** It does not collect, order, or submit UserOperations. It is a preflight check that runs before a bundler picks up the operation.
 - **Not a general-purpose module discovery engine.** It only resolves the specific submitted call path from the UserOperation's `callData` and `signature`. It does not walk on-chain account state to discover all installed modules or all registered validation-execution mappings.
 - **Single account implementation, single EntryPoint version.** The Solidity contracts target the [eth-infinitism/account-abstraction](https://github.com/eth-infinitism/account-abstraction) EntryPoint (ERC-4337 v0.7 packed UserOp format) and the [erc6900/reference-implementation](https://github.com/erc6900/reference-implementation) modular account. Solidity `^0.8.28`, EVM version `cancun`. ERC-6900 is a **Draft** standard — not Final — and has narrower real-world adoption than the competing ERC-7579 standard (used by Safe, ZeroDev, Biconomy, Rhinestone, OpenZeppelin). ERC-6900 is primarily associated with Alchemy's Modular Account.
@@ -82,22 +82,36 @@ GhostBundler implements **3 of the originally-planned 5** policy rules. The impl
 
 2. **Validation Applicability Violation** (`find_validation_applicability_violations`) — Catches when a validator has *no authorization path at all* to a selector that the operation invokes. The validator shouldn't be able to authorize execution of selectors it was never registered for.
 
-3. **Missing Execution Hook** (`find_missing_hooks`) — Catches when a sensitive selector (passed in as a `HashSet<[u8; 4]>`) has no pre/post execution hook guarding it. Sensitive selectors are currently hardcoded as `[0x00, 0x00, 0x00, 0x00]`.
+3. **Missing Execution Hook** (`find_missing_hooks`) — Catches when a sensitive selector (passed in as a `HashSet<[u8; 4]>`) has no pre/post execution hook guarding it. Sensitive selectors include `drain(address)` (`0xece53132`) from MockVault.
 
 The remaining 2 originally-planned rules are **not implemented** and represent future work.
 
 ## Demo
 
-The demo files (`demo/safe.json`, `demo/privilege-escalation.json`, `demo/run-demo.sh`) are currently empty placeholders. There is no integration test for ghostd that produces real verdict output.
+The `demo/` directory contains real, POST-able fixtures and a run script:
 
-The closest thing to a real demonstration is the `DeployTest::test_vaultDrainViaSessionKeyGlobalValidation` Solidity test, which end-to-end demonstrates the privilege escalation: a session key with `isGlobal=true` drains a MockVault holding 1000 MockUSDC by calling `vault.drain()` — a selector it was never explicitly scoped to. This test passes on every `forge test` run (5/5 tests pass across `DeployTest`).
+- **`demo/safe.json`** — A signed UserOp where the owner (`isGlobal=false`) calls a benign target. Expects `verdict: "safe"` with a permit issued.
+- **`demo/privilege-escalation.json`** — A signed UserOp where a session key (`isGlobal=true`) drains a MockVault via the global validation escape hatch. Expects `verdict: "unsafe"` with findings.
 
-To see real verdict output from ghostd, you would need to:
-1. Start Anvil and deploy the contracts
-2. Start ghostd
-3. Send a `POST /preflight` request with a shaped `PreFlightRequest`
+Both fixtures were generated from the same code as the Rust integration tests (`safe_call_gets_permit` and `unsafe_drain_captured_by_policy`), ensuring the JSON bytes match exactly what those tests sign and verify.
 
-This has not been scripted yet. **TODO: script the full demo flow and capture real output.**
+### Running the demo
+
+```bash
+./demo/run-demo.sh
+```
+
+This script:
+1. Starts Anvil if not already running (and stops it on exit if it started it)
+2. Deploys contracts if not already at the expected addresses
+3. Builds and starts ghostd on `:3000`
+4. Sends `safe.json` → prints the safe verdict + permit
+5. Sends `privilege-escalation.json` → prints the unsafe verdict + findings
+6. Cleanly shuts down ghostd (and Anvil if it was started by the script)
+
+Prerequisites: `anvil`, `forge`, and `cargo` must be in `PATH`.
+
+The closest Solidity-level demonstration is `DeployTest::test_vaultDrainViaSessionKeyGlobalValidation`, which end-to-end shows the privilege escalation: a session key with `isGlobal=true` drains a MockVault holding 1000 MockUSDC by calling `vault.drain()` — a selector it was never explicitly scoped to.
 
 ## Known Limitations / Honest Simplifications
 
@@ -113,7 +127,7 @@ This has not been scripted yet. **TODO: script the full demo flow and capture re
 
 6. **Hardcoded EntryPoint address.** `ghostd` uses `0x5FbDB2315678afecb367f032d93F642f64180aa3` as the EntryPoint address for simulation. This is the Anvil default deploy address.
 
-7. **Demo-only permit signer key.** Ghostd signs permits with the hardcoded key `[0xab; 32]`. RiskGate.sol and VerifyingPaymaster.sol expect the signer to be `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` (Anvil key #2). The demo key does **not** match the on-chain expected signer — permits issued by ghostd will be rejected by RiskGate in a real Anvil deployment unless the signer key is aligned.
+7. **Demo-only permit signer key.** Ghostd signs permits with Anvil key #2 (`0x5de4111afa1a...365a`), which matches RiskGate.sol's `PERMIT_SIGNER` constant (`0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC`). This was fixed during development — the initial implementation used a wrong key that would have caused all permits to be rejected on-chain.
 
 8. **No `handleOps` relay.** GhostBundler is a preflight check only. It does not submit UserOperations to the EntryPoint. The bundler (or a relay) must do that separately.
 
@@ -121,7 +135,17 @@ This has not been scripted yet. **TODO: script the full demo flow and capture re
 
 10. **ERC-6900 is a Draft standard.** It is not Final. The competing ERC-7579 standard has broader ecosystem adoption (Safe, ZeroDev, Biconomy, Rhinestone, OpenZeppelin). ERC-6900 is primarily associated with Alchemy's Modular Account. This project is a proof-of-concept against the ERC-6900 reference implementation, not a production-grade security tool for any specific wallet.
 
+11. **UserOp hash computation was wrong and fixed.** During development, the `user_op_hash` function initially used EIP-712 typed data format (`keccak256("\x19\x01" || domainSeparator || structHash)`), assuming the EntryPoint followed the standard EIP-712 pattern. In reality, the reference-implementation EntryPoint uses a simpler formula: `keccak256(abi.encode(userOp.hash(), address(this), block.chainid))` with no domain separator and no typehash prefix in the struct hash. This caused all on-chain signature verification to fail with `AA24 signature error` despite the struct hash values being correct. **Lesson learned:** cryptographic hash computations must be verified against the actual reference implementation source code immediately when written — not assumed from general EIP knowledge and verified later. The mismatch was caught by comparing Rust-computed hashes against on-chain `getUserOpHash` output.
+
 ## Running It Locally
+
+The quickest way is the demo script:
+
+```bash
+./demo/run-demo.sh
+```
+
+For manual control:
 
 ```bash
 # 1. Start Anvil (local Ethereum node)
@@ -139,48 +163,39 @@ cd ..
 cargo run -p ghostd
 # ghostd listening on :3000
 
-# 4. Send a preflight request
-curl -X POST http://localhost:3000/preflight \
+# 4. Send a preflight request (safe owner call)
+curl -s -X POST http://localhost:3000/preflight \
   -H 'Content-Type: application/json' \
-  -d '{
-    "userOp": {
-      "sender": "0x0000000000000000000000000000000000000000",
-      "nonce": "0x0",
-      "initCode": "0x",
-      "callData": "0xb61d27f6000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000064",
-      "accountGasLimits": "0x00000000000000000000000000000000000000000000000000000000000f4240",
-      "preVerificationGas": "0x5208",
-      "gasFees": "0x0000000000000000000000000000000000000000000000000000000000000001",
-      "paymasterAndData": "0x",
-      "signature": "0x"
-    },
-    "beneficiary": "0x0000000000000000000000000000000000000000"
-  }'
-```
+  -d @demo/safe.json | python3 -m json.tool
 
-The `callData` above encodes `execute(address,uint256,bytes)` with a target, zero value, and minimal calldata. The `PreFlightRequest` struct accepts `{ userOp: PackedUserOperation, beneficiary: Address }` (all fields use `camelCase` in JSON).
+# 5. Send a preflight request (unsafe session key drain)
+curl -s -X POST http://localhost:3000/preflight \
+  -H 'Content-Type: application/json' \
+  -d @demo/privilege-escalation.json | python3 -m json.tool
+```
 
 ### Running the Solidity Tests
 
 ```bash
 cd contracts
 forge test -vv
-# DeployTest      | 5 passed
-# RiskGateTest    | 10 passed
+# EPTest                | 1 passed
+# DeployTest           | 5 passed
+# RiskGateTest         | 10 passed
 # VerifyingPaymasterTest | 8 passed
-# Total: 23 tests, all passing
+# Total: 24 tests, all passing
 ```
 
 ### Running the Rust Tests
 
 ```bash
-cargo test
-# aa-types:  9 passed
+cargo test --workspace
+# aa-types:  10 passed
 # policy:    3 passed
-# sim:       5 passed (including 1 integration test that skips without Anvil)
+# sim:       4 passed
 # permit:    6 passed
-# ghostd:    0 tests
-# Total: 23 tests, all passing
+# ghostd:    3 passed (requires Anvil on :8545)
+# Total: 26 tests, all passing
 ```
 
 ## Tech Stack
