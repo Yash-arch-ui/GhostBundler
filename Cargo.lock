@@ -1852,8 +1852,10 @@ version = "0.1.0"
 dependencies = [
  "aa-types",
  "alloy-primitives",
+ "alloy-sol-types",
  "axum",
  "hex",
+ "k256",
  "permit",
  "policy",
  "serde",
