@@ -8,7 +8,7 @@
  */
 
 use aa_types::PackedUserOperation;
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::{SolCall, SolError, sol};
@@ -21,9 +21,9 @@ sol! {
         uint256 nonce;
         bytes initCode;
         bytes callData;
-        uint256 accountGasLimits;
+        bytes32 accountGasLimits;
         uint256 preVerificationGas;
-        uint256 gasFees;
+        bytes32 gasFees;
         bytes paymasterAndData;
         bytes signature;
     }
@@ -65,9 +65,9 @@ fn pack_user_op(op: &PackedUserOperation) -> Sop {
         nonce: op.nonce,
         initCode: op.init_code.clone(),
         callData: op.call_data.clone(),
-        accountGasLimits: U256::from_be_bytes(op.account_gas_limits.0),
+        accountGasLimits: op.account_gas_limits,
         preVerificationGas: op.pre_verification_gas,
-        gasFees: U256::from_be_bytes(op.gas_fees.0),
+        gasFees: op.gas_fees,
         paymasterAndData: op.paymaster_and_data.clone(),
         signature: op.signature.clone(),
     }
@@ -104,23 +104,24 @@ fn classify_revert(revert_data: &[u8]) -> SimOutcome {
 
     if let Ok(err) = FailedOpWithRevert::abi_decode(revert_data) {
         let reason = err.reason;
+        let inner_hex = format!("0x{}", hex::encode(&err.inner));
         if reason.starts_with("AA2") || reason.starts_with("AA1") {
             return SimOutcome::AccountError {
-                reason: format!("opIndex={}: {}", err.opIndex, reason),
+                reason: format!("opIndex={}: {} (inner: {})", err.opIndex, reason, inner_hex),
             };
         }
         if reason.starts_with("AA3") {
             return SimOutcome::PaymasterError {
-                reason: format!("opIndex={}: {}", err.opIndex, reason),
+                reason: format!("opIndex={}: {} (inner: {})", err.opIndex, reason, inner_hex),
             };
         }
         return SimOutcome::AccountError {
-            reason: format!("opIndex={}: {}", err.opIndex, reason),
+            reason: format!("opIndex={}: {} (inner: {})", err.opIndex, reason, inner_hex),
         };
     }
 
     SimOutcome::Unknown {
-        raw: format!("0x{}", hex::encode(revert_data)),
+        raw: format!("revert_data: 0x{}", hex::encode(revert_data)),
     }
 }
 
@@ -161,13 +162,26 @@ pub async fn simulate_validation(
         Err(e) => {
             let msg = e.to_string();
             // alloy reports transport errors as strings; try to extract the revert data
-            if let Some(start) = msg.find("data=\"0x") {
-                let data_start = start + 8;
-                if let Some(end) = msg[data_start..].find('"') {
-                    let hex_str = &msg[data_start..data_start + end];
-                    if let Ok(bytes) = hex::decode(hex_str) {
-                        return Ok(classify_revert(&bytes));
+            // Try both formats: `data="0x..."` and `data: "0x..."`
+            let hex_str = msg
+                .find("data:")
+                .or_else(|| msg.find("data="))
+                .and_then(|start| {
+                    let rest = &msg[start + 5..];
+                    // skip optional colon+space
+                    let rest = rest.trim_start_matches(|c| c == ':' || c == ' ');
+                    if rest.starts_with("\"0x") {
+                        let data_start = 3; // skip "0x
+                        if let Some(end) = rest[data_start..].find('"') {
+                            return Some(&rest[data_start..data_start + end]);
+                        }
                     }
+                    None
+                });
+            if let Some(hex_str) = hex_str {
+                if let Ok(bytes) = hex::decode(hex_str) {
+                    eprintln!("DEBUG classify_revert: data len={}, data={}", bytes.len(), hex_str);
+                    return Ok(classify_revert(&bytes));
                 }
             }
             Ok(SimOutcome::Unknown { raw: msg })
