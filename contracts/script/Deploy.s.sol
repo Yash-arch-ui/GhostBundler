@@ -11,13 +11,17 @@ import {SingleSignerValidationModule} from "reference-implementation/src/modules
 import {ValidationConfigLib} from "reference-implementation/src/libraries/ValidationConfigLib.sol";
 import {ModuleEntityLib} from "reference-implementation/src/libraries/ModuleEntityLib.sol";
 
+import {RiskGate} from "../src/RiskGate.sol";
+import {MockUSDC} from "../src/MockUSDC.sol";
+import {MockVault} from "../src/MockVault.sol";
+
 contract DeployScript is Script {
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address owner = vm.addr(deployerKey);
         address sessionKey = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
 
-        // --- Phase 1: Deploy contracts (broadcast) ---
+        // --- Phase 1: Deploy contracts ---
         vm.startBroadcast(deployerKey);
 
         EntryPoint entryPoint = new EntryPoint();
@@ -33,37 +37,18 @@ contract DeployScript is Script {
         );
         ReferenceModularAccount account = factory.createAccount(owner, 0, 0);
 
+        RiskGate riskGate = new RiskGate();
+        MockUSDC usdc = new MockUSDC();
+        MockVault vault = new MockVault(address(usdc));
+
+        // Fund account for EntryPoint gas prefund
+        (bool sent,) = address(account).call{value: 1 ether}("");
+        require(sent, "ETH transfer failed");
+
         vm.stopBroadcast();
 
-        // --- Phase 2: Configure validators (prank as account, not broadcast) ---
-        // Fund account for gas
-        vm.deal(address(account), 1 ether);
-
-        // Factory installed entityId 0 with isGlobal=true.
-        // Uninstall it and reinstall with isGlobal=false (scoped).
-        vm.prank(address(account));
-        account.uninstallValidation(
-            ModuleEntityLib.pack(address(singleSigner), 0),
-            abi.encode(uint32(0)),
-            new bytes[](0)
-        );
-
-        vm.prank(address(account));
-        account.installValidation(
-            ValidationConfigLib.pack(address(singleSigner), 0, false, true, true),
-            new bytes4[](0),
-            abi.encode(uint32(0), owner),
-            new bytes[](0)
-        );
-
-        // Install entityId 1 = session key, isGlobal=true (intentionally unsafe)
-        vm.prank(address(account));
-        account.installValidation(
-            ValidationConfigLib.pack(address(singleSigner), 1, true, true, true),
-            new bytes4[](0),
-            abi.encode(uint32(1), sessionKey),
-            new bytes[](0)
-        );
+        // --- Phase 2: Fund vault with USDC (cheatcode, no broadcast needed) ---
+        usdc.mint(address(vault), 1000e6);
 
         // --- Phase 3: Log everything ---
         console.log("====================================");
@@ -75,6 +60,9 @@ contract DeployScript is Script {
         console.log("Account:                ", address(account));
         console.log("Owner:                  ", owner);
         console.log("Session Key:            ", sessionKey);
+        console.log("RiskGate:               ", address(riskGate));
+        console.log("MockUSDC:               ", address(usdc));
+        console.log("MockVault:              ", address(vault));
         console.log("====================================");
     }
 }
